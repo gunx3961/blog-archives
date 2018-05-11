@@ -115,4 +115,61 @@ loader 会负责找到并下载文件。首先需要找到入口文件，在 HTM
 
 ![10_construction](https://hacks.mozilla.org/files/2018/03/10_construction.png)
 
-可想而知，如果主线程一直等待下载这些文件，会有大量任务被阻塞，再浏览器中加载文件会占用大量的时间。
+可想而知，如果主线程一直等待下载这些文件，会有大量任务被阻塞，在浏览器中加载文件会占用大量的时间。
+
+![11_latency](https://hacks.mozilla.org/files/2018/03/11_latency.png)
+
+为了不让模块加载导致你的应用慢到不能用，ESM 标准只对构建算法进行约束，让浏览器自己来拉取文件并完成依赖关系的整理，好进行接下来的同步的实例化工作。  
+这些分阶段完成的工作是 ESM 和 CommonJS 模块最关键的区别。  
+CommonJS 直接从文件系统加载文件，比从网络中下载文件要快得多。Node 可以阻塞主线程来等待文件加载完成，然后直接对它进行实例化和赋值的工作。这意味着你的代码会在返回模块实例之前同步地顺着依赖树一直加载、实例化并执行。
+
+![12_cjs_require](https://hacks.mozilla.org/files/2018/03/12_cjs_require.png)
+
+在后面我们还会继续阐述 CommonJS 的这种机制带来的不同表现，这里先举一个例子：在 Node 的 CommonJS 模块中，你可以在定位符中使用变量，所有 `requier()` 之前的代码都会被执行，所以在进行模块解析时定位符中的变量是有值的。  
+但是在 ESM 里需要先梳理依赖关系再执行，所以你无法在定位符中使用还没有值的变量。
+
+![13_static_import](https://hacks.mozilla.org/files/2018/03/13_static_import.png)
+
+但是在定位符中使用变量确实是很有用的一种特性，比如有时候你的模块位置可能会依赖于运行环境。为了能让 ESM 也支持这种特性，[动态导入（dynamic import）](https://github.com/tc39/proposal-dynamic-import) 提案让我们能使用形如 ``import(`${path}/foo.js`)`` 的方式使用导入声明。  
+每一个使用 `import()` 的文件都会被视为依赖关系图中的入口文件，并分别处理依赖关系。
+
+![14dynamic_import_graph](https://hacks.mozilla.org/files/2018/03/14dynamic_import_graph.png)
+
+值得一提的是，即使是在不同依赖树下的同一模块，也会共享同一份模块实例。loader 会将模块实例缓存下来，在同一个全局作用域下每个模块只会存在一份实例。  
+这样使引擎的工作量变得更少，模块文件只会被拉取一次。（而这只是模块缓存的其中一个原因，我们将在赋值阶段看到另一个原因。）  
+loader 使用 [module map](https://html.spec.whatwg.org/multipage/webappapis.html#module-map)来管理模块缓存。每个全局作用域都有其独立的 module map 来管理它们的模块。  
+当 loader 将要拉取一个模块时，会将其 URL 放入 module map 中，并标记其 fetching 状态，发送对应的请求，再开始拉取下一个模块。
+
+![15_module_map](https://hacks.mozilla.org/files/2018/03/15_module_map.png)
+
+如果有另一个模块依赖相同的文件，loader 会现在 module map 中查找，如果结果是 fetching 状态，loader 会跳过当前文件开始下一个 URL 的加载。  
+module map 不仅会追踪文件的拉取状态，同时还用来缓存模块实例，让我们继续讲解。
+
+## 解析模块
+
+当文件加载完成，我们需要将其解析为模块记录。浏览器通过模块记录来理解模块的内部构造。
+
+![25_file_to_module_record](https://hacks.mozilla.org/files/2018/03/25_file_to_module_record.png)
+
+模块记录被解析后会被放在 module map 中，可供之后的所有对该模块的请求使用。
+
+![25_module_map](https://hacks.mozilla.org/files/2018/03/25_module_map.png)
+
+这里有一些细节需要注意，被解析的模块和普通的脚本有所不同，所有的模块都会被视为严格模式，还有一些区别例如 `await` 是顶层代码的保留字，以及 `this` 的值是 `undefined`。  
+这些解析上的区别对待被称为 “parse goal”，在对同一个文件的解析上应用不同的 parse goal 会得到不同的结果。所以我们必须事先知道我们要解析的文件到底是什么角色——它是否是一个模块文件。  
+在浏览器中要做到这点很容易，只需在 script 标签加入 `type="module"`，就可以明确声明该文件应该当作模块解析。同样的，只有模块能够被导入，所以每一个被 `import` 的文件也是模块。
+
+![26_parse_goal](https://hacks.mozilla.org/files/2018/03/26_parse_goal.png)
+
+但是在 Node 中没有 HTML 标签，没有一个可用来标识模块的选项。社区曾尝试过使用 `.mjs` 拓展名来标识模块，我们之后还会看到关于 parse goal 的讨论，这是一个正在进行的议题，现在我们还不清楚 Node 社区最后选择哪种方式来作为模块标识。  
+总之，loader 需要知道被解析的文件是否是一个模块，如果被导入的模块里有其他的导入，loader 将一直工作直到所有文件都被加载并解析。  
+至此模块的构造阶段的工作就完成了，我们从一个入口文件拿到了整个应用的模块记录。
+
+![27_construction](https://hacks.mozilla.org/files/2018/03/27_construction.png)
+
+接下来该进行实例化并将所有实例链接起来了。
+
+## 实例化
+
+正如上文提到的，一个模块实例包含了代码和状态。状态由内存描述，实例化阶段实际上是在进行分配内存的工作。  
+首先，JS 引擎会创建一个模块环境记录（module environment record）用来管理模块记录中的变量，然后给所有 `export` 分配内存空间，模块环境记录用来记录所有 `export` 对应的内存地址。
