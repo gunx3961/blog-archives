@@ -137,7 +137,7 @@ CommonJS 直接从文件系统加载文件，比从网络中下载文件要快�
 
 值得一提的是，即使是在不同依赖树下的同一模块，也会共享同一份模块实例。loader 会将模块实例缓存下来，在同一个全局作用域下每个模块只会存在一份实例。  
 这样使引擎的工作量变得更少，模块文件只会被拉取一次。（而这只是模块缓存的其中一个原因，我们将在赋值阶段看到另一个原因。）  
-loader 使用 [module map](https://html.spec.whatwg.org/multipage/webappapis.html#module-map)来管理模块缓存。每个全局作用域都有其独立的 module map 来管理它们的模块。  
+loader 使用 [module map](https://html.spec.whatwg.org/multipage/webappapis.html#module-map) 来管理模块缓存。每个全局作用域都有其独立的 module map 来管理它们的模块。  
 当 loader 将要拉取一个模块时，会将其 URL 放入 module map 中，并标记其 fetching 状态，发送对应的请求，再开始拉取下一个模块。
 
 ![15_module_map](https://hacks.mozilla.org/files/2018/03/15_module_map.png)
@@ -172,4 +172,68 @@ module map 不仅会追踪文件的拉取状态，同时还用来缓存模块实
 ## 实例化
 
 正如上文提到的，一个模块实例包含了代码和状态。状态由内存描述，实例化阶段实际上是在进行分配内存的工作。  
-首先，JS 引擎会创建一个模块环境记录（module environment record）用来管理模块记录中的变量，然后给所有 `export` 分配内存空间，模块环境记录用来记录所有 `export` 对应的内存地址。
+首先，JS 引擎会创建一个模块环境记录（module environment record）用来管理模块记录中的变量，然后给所有 `export` 分配内存空间，模块环境记录用来记录所有 `export` 对应的内存地址。  
+变量此时仅做初始化，在赋值阶段才会被赋值。为了更方便地进行赋值阶段的工作，所有被 `export` 的函数声明也会在这个阶段被初始化。  
+JS 引擎会对整个依赖树进行一次后序遍历，从叶子节点（也就是没有其他依赖的文件）开始对 `export` 分配内存地址。
+
+![30_live_bindings_01](https://hacks.mozilla.org/files/2018/03/30_live_bindings_01.png)
+
+引擎自底向上完成对所有 `export` 的地址分配后，又从根节点自顶向下地对 `import` 进行内存地址的绑定。  
+对应的 `export` 和 `import` 指向的是相同的地址，先对 `export` 分配内存保证了每个 `import` 都指向正确的内存地址。
+
+![30_live_bindings_02](https://hacks.mozilla.org/files/2018/03/30_live_bindings_02.png)
+
+在 CommonJS 中，整个导出对象是被赋值拷贝的。
+
+![31_cjs_variable](https://hacks.mozilla.org/files/2018/03/31_cjs_variable.png)
+
+而在 ESM 中，导入和导出模块指向同一片内存空间，当导出模块的值被改变，导入模块会反映其变化。  
+导出模块可以任意地改编模块值，但是被导入的模块的值不能被改写。当然，如果被导入的值是一个对象，我们可以改写对象的属性。
+
+![30_live_bindings_04](https://hacks.mozilla.org/files/2018/03/30_live_bindings_04.png)
+
+ESM 使用这种 live bindings 的原因在于，引擎不运行代码即可完成模块之间的绑定。我们会在下文中阐述，这一点为赋值阶段的循环引用带来的帮助。  
+至此实例化阶段也结束了，我们得到了所有模块的实例，导入、导出模块也在内存中被联系起来。  
+现在我们可以执行代码，对模块进行赋值了。
+
+## 赋值
+
+最后一步我们将给已分配好的内存空间赋值。JS 引擎将执行顶层代码——函数外的代码。  
+除了赋值之外，执行代码时可能会有其他的副作用，比如模块可能会发送请求。
+
+![40_top_level_code](https://hacks.mozilla.org/files/2018/03/40_top_level_code.png)
+
+正是因为有潜在的副作用存在，我们希望所有模块的代码被精确地只执行一次，赋值阶段执行代码的次数可能会影响执行结果。  
+这也是为什么我们需要 module map 来缓存 URL，module map 保证了模块记录的唯一性，也保证了所有模块只被执行一次。和实例化中一样，模块代码的执行顺序也是通过后序遍历决定的。
+
+接下来我们讲讲循环引用。  
+循环引用来源于你依赖关系中的回路。通常来说这会是一条比较长的回路，但是为了图方便我们使用一个短回路作为例子来解释这个问题。
+
+![41_cjs_cycle](https://hacks.mozilla.org/files/2018/03/41_cjs_cycle.png)
+
+我们来看 CommonJS 在这里如何工作。main 模块会执行到 `require` 语句之前，然后读取 counter 模块。
+
+![41_cyclic_graph](https://hacks.mozilla.org/files/2018/03/41_cyclic_graph.png)
+
+counter 模块尝试访问 main 模块的 `message`，但是此时的 main 模块尚未执行至此，拿到一个 `undefined` 。JS 引擎将为 `message` 这个本地变量分配内存空间然后赋值为 `undefined`。
+
+![42_cjs_variable_2](https://hacks.mozilla.org/files/2018/03/42_cjs_variable_2.png)
+
+代码继续执行至 counter 模块的顶层代码结束，我们设置一个 `setTimeout` 来确认最终（main.js 执行结束后）我们是否会拿到 messsage 的值。
+
+![43_cjs_cycle](https://hacks.mozilla.org/files/2018/03/43_cjs_cycle.png)
+
+main.js 中的 `message` 会被初始化放入内存，但是 counter 模块引入的 `message` 对此并无感知，依旧为 `undefined`。
+
+![44_cjs_variable_2](https://hacks.mozilla.org/files/2018/03/44_cjs_variable_2.png)
+
+如果模块是通过 live bindings 维系的， main.js 执行结束后会将模块正确地赋值，`setTimeout` 的回调也就能拿到正确的值了。  
+对于循环引用的支持时 ESM 设计背后的一种理性考量，三段式的执行步骤使之成为可能。
+
+## ESM 的现状？
+
+随着 5 月初正式发布的 Firefox 60，所有主流浏览器均已默认支持 ESM。Node 的 [模块小组](https://github.com/nodejs/modules) 也正致力于解决 ESM 和 CommonJS 之间的兼容性问题。  
+
+这意味着我们已经可以在脚本标签中使用 `type=module` 并且导入导出模块。不过现阶段还有很多模块相关的功能还在议案中，[dynamic import proposal](https://github.com/tc39/proposal-dynamic-import) 目前在 Stage 3 阶段，[import.meta](https://github.com/tc39/proposal-import-meta) 和 [module resolution proposal](https://github.com/domenic/package-name-maps) 也在致力抹平 Node 和浏览器端模块使用上的差距，希望我们能看到 ESM 更好的未来。
+
+（译者：多说一句，在不解决浏览器端的依赖关系层级打平的问题前，打包方案可能才是银弹。）
