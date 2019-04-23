@@ -236,4 +236,4 @@ main.js 中的 `message` 会被初始化放入内存，但是 counter 模块引�
 
 这意味着我们已经可以在脚本标签中使用 `type=module` 并且导入导出模块。不过现阶段还有很多模块相关的功能还在议案中，[dynamic import proposal](https://github.com/tc39/proposal-dynamic-import) 目前在 Stage 3 阶段，[import.meta](https://github.com/tc39/proposal-import-meta) 和 [module resolution proposal](https://github.com/domenic/package-name-maps) 也在致力抹平 Node 和浏览器端模块使用上的差距，希望我们能看到 ESM 更好的未来。
 
-（译者：多说一句，在不解决浏览器端的依赖关系层级打平的问题前，打包方案可能才是银弹。）
+（我觉得：在不解决浏览器端的依赖关系层级打平的问题前，打包方案可能才是银弹。）
